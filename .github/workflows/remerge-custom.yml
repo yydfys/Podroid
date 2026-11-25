@@ -1,0 +1,89 @@
+name: remerge-custom-files
+
+# 把「自己的定制 6 个文件」改成：以合入后的文件为 ours，重新对上游做三方，
+# 保留上游改动 + 把我们的补丁打上去，只留真正的冲突块。推 v2 分支并打印冲突块 + 编译。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  remerge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: merge/upstream-20261126
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/ExTV/Podroid.git
+          git fetch --no-tags upstream main
+          git checkout -B merge/upstream-20261126-v2
+
+      - name: Rebuild custom files from upstream + our patches
+        run: |
+          set -euo pipefail
+          BASE=$(git rev-list -1 --before="2026-11-08T00:00:00Z" upstream/main)
+          echo "base=$(echo "$BASE" | cut -c1-8)"
+          FILES=(
+            "app/src/main/java/com/excp/podroid/service/PodroidService.kt"
+            "app/src/main/java/com/excp/podroid/engine/EngineHolder.kt"
+            "app/src/main/java/com/excp/podroid/engine/VmEngine.kt"
+            "app/src/main/java/com/excp/podroid/util/AppPermissions.kt"
+            "app/src/test/java/com/excp/podroid/util/AppPermissionsTest.kt"
+            "app/src/main/java/com/excp/podroid/ui/screens/setup/SetupScreen.kt"
+            "app/src/main/java/com/excp/podroid/ui/screens/home/HomeScreen.kt"
+          )
+          for f in "${FILES[@]}"; do
+            git show "HEAD:$f"          > /tmp/ours
+            git show "$BASE:$f"         > /tmp/base 2>/dev/null || : > /tmp/base
+            git show "upstream/main:$f" > /tmp/theirs
+            cp /tmp/theirs "$f"
+            if git merge-file -p /tmp/ours /tmp/base /tmp/theirs > /tmp/m 2>/dev/null; then
+              cp /tmp/m "$f"; echo "CLEAN  $f"
+            else
+              cp /tmp/m "$f"; echo "MARKED $(grep -c '^<<<<<<<' "$f") hunks  $f"
+            fi
+          done
+          git config user.name "podroid-sync"; git config user.email "sync@local"
+          git add -A
+          git commit -m "chore(sync): 定制文件改为上游新版 + 我方补丁（3way）[skip ci]" || echo "no change"
+          git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/merge/upstream-20261126-v2
+
+      - name: Print unresolved hunks
+        run: |
+          set +e
+          for f in $(grep -rl "^<<<<<<<" app/src --include=*.kt 2>/dev/null); do
+            echo "########## $f"
+            awk '/^<<<<<<</{p=1; n=0} p{print NR": "$0; n++} /^>>>>>>>/{if(p){p=0; print "----"}}' "$f" | head -80
+          done
+
+      - name: Prepare Android SDK
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SM" ] || SM=$(find "$SDK/cmdline-tools" -maxdepth 3 -name sdkmanager | head -1)
+          yes | "$SM" --licenses > /dev/null 2>&1 || true
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Compile check
+        run: |
+          set +e
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:compileDebugKotlin > /tmp/b.log 2>&1
+          echo "gradle exit=$?"
+          grep -E "^e: " /tmp/b.log | head -40
+          exit 0
