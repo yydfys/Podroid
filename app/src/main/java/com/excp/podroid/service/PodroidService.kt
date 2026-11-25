@@ -286,6 +286,7 @@ class PodroidService : Service() {
         notificationJob = serviceScope.launch {
             launch { observeStateForNotification() }
             launch { observeStateForShutdown() }
+<<<<<<< /tmp/ours
             launch { observeStateForOverlay() }
             launch {
                 portForwardRepository.rules.collect { rules ->
@@ -293,6 +294,8 @@ class PodroidService : Service() {
                     overlayBubble?.refresh()
                 }
             }
+=======
+>>>>>>> /tmp/theirs
             launch { observeUmlFallbackNotices() }
         }
     }
