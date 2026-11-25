@@ -1,0 +1,91 @@
+name: merge-upstream-apply
+
+# 一次性：把上游 main 合进来（历史已不共享，用 --allow-unrelated-histories），
+# 冲突按「自己的定制文件保留我方，其余取上游」，推到 merge/ 分支并做编译验证。
+# 不推 main、不发版。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/ExTV/Podroid.git
+          git fetch --no-tags upstream main
+
+      - name: Merge and resolve
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name  "podroid-sync"
+          git config user.email "sync@local"
+          UP=$(git rev-parse --short upstream/main)
+
+          git merge --no-commit --no-ff --allow-unrelated-histories upstream/main || true
+
+          # 自己改过的文件：保留我方（含悬浮球 / VM 自动拉起 / OVERLAY 权限那一整套）
+          KEEP_OURS=(
+            "app/src/main/java/com/excp/podroid/service/PodroidService.kt"
+            "app/src/main/java/com/excp/podroid/engine/VmEngine.kt"
+            "app/src/main/java/com/excp/podroid/engine/EngineHolder.kt"
+            "app/src/main/java/com/excp/podroid/util/AppPermissions.kt"
+            "app/src/test/java/com/excp/podroid/util/AppPermissionsTest.kt"
+            "app/src/main/java/com/excp/podroid/ui/screens/setup/SetupScreen.kt"
+            "app/src/main/java/com/excp/podroid/ui/screens/home/HomeScreen.kt"
+          )
+          echo "=== 冲突处理明细 ==="
+          for f in $(git diff --name-only --diff-filter=U); do
+            take=theirs
+            for k in "${KEEP_OURS[@]}"; do [ "$f" = "$k" ] && take=ours; done
+            git checkout "--$take" -- "$f"
+            git add "$f"
+            echo "  $take  $f"
+          done
+
+          # add/add 但没冲突标记的（内容相同或仅一侧存在）
+          git diff --name-only --diff-filter=U | while read -r f; do git add "$f"; done || true
+
+          if git diff --cached --quiet && ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+            echo "没有可提交的内容，退出"; exit 1
+          fi
+          git commit -m "chore(sync): merge upstream ${UP} (unrelated histories) [skip ci]"
+          git push origin HEAD:refs/heads/merge/upstream-20261126
+          echo "=== 推送完成 ==="
+          git log --oneline -2
+
+      - name: Prepare Android SDK
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SM" ] || SM=$(find "$SDK/cmdline-tools" -maxdepth 3 -name sdkmanager | head -1)
+          yes | "$SM" --licenses > /dev/null 2>&1 || true
+          echo "sdk root: $SDK"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Compile check (assembleDebug)
+        run: |
+          set -o pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :app:assembleDebug 2>&1 | tail -120
