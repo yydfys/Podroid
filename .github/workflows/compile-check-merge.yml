@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: merge/upstream-20261126
+          ref: merge/upstream-20261126-v2
           fetch-depth: 1
       - name: Prepare Android SDK
         run: |
