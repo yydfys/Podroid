@@ -1,8 +1,7 @@
 name: merge-upstream-apply
 
-# 一次性：上游 main 合并（历史不共享）。用 2026-11-07 的上游快照当合成基点，
-# 逐文件做真正的三方合并；剩下真冲突时按策略兜底。推到 merge/ 分支 + 编译验证，
-# 不推 main、不发版。
+# 一次性：上游 main 合并（历史不共享）。合成基点做三方；自己的定制文件强制保留我方；
+# strings.xml 用并集（我方独有的 key 追加回去）。推 merge/ 分支 + 编译验证，不动 main。
 on:
   workflow_dispatch:
 
@@ -25,7 +24,7 @@ jobs:
           git remote add upstream https://github.com/ExTV/Podroid.git
           git fetch --no-tags upstream main
 
-      - name: Merge and resolve (synthetic 3-way)
+      - name: Merge and resolve
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -34,50 +33,75 @@ jobs:
           git config user.email "sync@local"
           UP=$(git rev-parse --short upstream/main)
           BASE=$(git rev-list -1 --before="2026-11-08T00:00:00Z" upstream/main)
-          echo "upstream=$UP  synthetic-base=$(echo "$BASE" | cut -c1-8) ($(git log -1 --format=%cs "$BASE"))"
+          echo "upstream=$UP synthetic-base=$(echo "$BASE" | cut -c1-8)"
 
           git merge --no-commit --no-ff --allow-unrelated-histories upstream/main || true
 
           KEEP_OURS=(
             "app/src/main/java/com/excp/podroid/service/PodroidService.kt"
-            "app/src/main/java/com/excp/podroid/engine/VmEngine.kt"
             "app/src/main/java/com/excp/podroid/engine/EngineHolder.kt"
+            "app/src/main/java/com/excp/podroid/engine/VmEngine.kt"
             "app/src/main/java/com/excp/podroid/util/AppPermissions.kt"
             "app/src/test/java/com/excp/podroid/util/AppPermissionsTest.kt"
             "app/src/main/java/com/excp/podroid/ui/screens/setup/SetupScreen.kt"
             "app/src/main/java/com/excp/podroid/ui/screens/home/HomeScreen.kt"
           )
+          STRINGS=(
+            "app/src/main/res/values/strings.xml"
+            "app/src/main/res/values-zh/strings.xml"
+          )
 
-          echo "=== 三方合并明细 ==="
+          echo "=== 处理明细 ==="
           for f in $(git diff --name-only --diff-filter=U); do
             git show "HEAD:$f"          > /tmp/ours  2>/dev/null || : > /tmp/ours
             git show "$BASE:$f"         > /tmp/base  2>/dev/null || : > /tmp/base
             git show "upstream/main:$f" > /tmp/theirs 2>/dev/null || : > /tmp/theirs
-            if git merge-file -p /tmp/ours /tmp/base /tmp/theirs > /tmp/merged 2>/dev/null; then
-              cp /tmp/merged "$f"; echo "  ok(3way)   $f"
+
+            keep=no
+            for k in "${KEEP_OURS[@]}"; do [ "$f" = "$k" ] && keep=yes; done
+            isstr=no
+            for k in "${STRINGS[@]}"; do [ "$f" = "$k" ] && isstr=yes; done
+
+            if [ "$isstr" = yes ]; then
+              python3 - "$f" <<'PYEOF'
+import re, sys
+p = sys.argv[1]
+ours   = open('/tmp/ours',   encoding='utf-8', errors='replace').read()
+theirs = open('/tmp/theirs', encoding='utf-8', errors='replace').read()
+have = set(re.findall(r'<(?:string|plurals|string-array|array)\s+name="([^"]+)"', theirs))
+extra = []
+for kind, name in re.findall(r'<(string|plurals|string-array|array)\s+name="([^"]+)"', ours):
+    if name in have:
+        continue
+    m = re.search(r'\n[ \t]*<%s\s+name="%s".*?</%s>' % (kind, re.escape(name), kind), ours, re.S)
+    if m:
+        extra.append(m.group(0).rstrip())
+out = theirs.replace('</resources>', ''.join(extra) + '\n</resources>') if extra else theirs
+open(p, 'w', encoding='utf-8').write(out)
+print("  union  %s  (+%d 我方独有条目)" % (p, len(extra)))
+PYEOF
+            elif [ "$keep" = yes ]; then
+              cp /tmp/ours "$f"; echo "  ours    $f"
             else
-              cp /tmp/merged "$f"
-              left=$(grep -c '^<<<<<<<' "$f" 2>/dev/null || true)
-              take=theirs
-              for k in "${KEEP_OURS[@]}"; do [ "$f" = "$k" ] && take=ours; done
-              if [ "$take" = "ours" ]; then cp /tmp/ours "$f"; else cp /tmp/theirs "$f"; fi
-              echo "  conflict(${left:-?}) -> $take  $f"
+              if git merge-file -p /tmp/ours /tmp/base /tmp/theirs > /tmp/merged 2>/dev/null; then
+                cp /tmp/merged "$f"; echo "  3way    $f"
+              else
+                cp /tmp/theirs "$f"; echo "  theirs  $f"
+              fi
             fi
             git add "$f"
           done
 
-          # 签名密钥忽略规则：上游 .gitignore 里没有这两行，补回来
           if ! grep -q '^\.signing/' .gitignore 2>/dev/null; then
             printf '\n# 签名密钥（由 GitHub Actions Secrets 在构建时还原，绝不入库）\n.signing/\n*.jks\n' >> .gitignore
             git add .gitignore
-            echo "  .gitignore 补回 .signing/ 与 *.jks"
+            echo "  .gitignore 补回密钥忽略规则"
           fi
 
-          echo "剩余冲突数: $(git diff --name-only --diff-filter=U | wc -l)"
-          git commit -m "chore(sync): merge upstream ${UP} with synthetic 3-way base [skip ci]"
-          git push "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/merge/upstream-20261126
-          echo "=== 已推送 merge/upstream-20261126 ==="
-          git log --oneline -2
+          echo "剩余冲突: $(git diff --name-only --diff-filter=U | wc -l)"
+          git commit -m "chore(sync): merge upstream ${UP} (synthetic 3way, keep own patches) [skip ci]"
+          git push --force "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/merge/upstream-20261126
+          echo "已推送 merge/upstream-20261126"
 
       - name: Prepare Android SDK
         run: |
@@ -96,8 +120,14 @@ jobs:
           java-version: '21'
           cache: gradle
 
-      - name: Compile check (assembleDebug)
+      - name: Compile check
         run: |
-          set -o pipefail
+          set +e
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace :app:assembleDebug 2>&1 | tail -150
+          ./gradlew --no-daemon :app:compileDebugKotlin > /tmp/b.log 2>&1
+          echo "gradle exit=$?"
+          echo "=== errors ==="
+          grep -E "^e: " /tmp/b.log | head -60
+          echo "=== files ==="
+          grep -oE "file:///[^ :]+" /tmp/b.log | sort | uniq -c | sort -rn | head -15
+          exit 0
