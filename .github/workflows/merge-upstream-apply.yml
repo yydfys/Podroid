@@ -24,6 +24,27 @@ jobs:
           git remote add upstream https://github.com/ExTV/Podroid.git
           git fetch --no-tags upstream main
 
+      - name: Write helper script
+        run: |
+          cat > /tmp/union.py <<"PYEOF"
+          import re, sys
+          p = sys.argv[1]
+          ours   = open("/tmp/ours",   encoding="utf-8", errors="replace").read()
+          theirs = open("/tmp/theirs", encoding="utf-8", errors="replace").read()
+          have = set(re.findall(r'<(?:string|plurals|string-array|array)\s+name="([^"]+)"', theirs))
+          extra = []
+          for kind, name in re.findall(r'<(string|plurals|string-array|array)\s+name="([^"]+)"', ours):
+              if name in have:
+                  continue
+              m = re.search(r'\n[ \t]*<%s\s+name="%s".*?</%s>' % (kind, re.escape(name), kind), ours, re.S)
+              if m:
+                  extra.append(m.group(0).rstrip())
+          out = theirs.replace("</resources>", "".join(extra) + "\n</resources>") if extra else theirs
+          open(p, "w", encoding="utf-8").write(out)
+          print("  union  %s  (+%d own entries)" % (p, len(extra)))
+          PYEOF
+          python3 -c "import ast,sys; ast.parse(open('/tmp/union.py').read()); print('union.py ok')"
+
       - name: Merge and resolve
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -51,35 +72,15 @@ jobs:
             "app/src/main/res/values-zh/strings.xml"
           )
 
-          echo "=== 处理明细 ==="
+          echo "=== resolve ==="
           for f in $(git diff --name-only --diff-filter=U); do
             git show "HEAD:$f"          > /tmp/ours  2>/dev/null || : > /tmp/ours
             git show "$BASE:$f"         > /tmp/base  2>/dev/null || : > /tmp/base
             git show "upstream/main:$f" > /tmp/theirs 2>/dev/null || : > /tmp/theirs
-
-            keep=no
-            for k in "${KEEP_OURS[@]}"; do [ "$f" = "$k" ] && keep=yes; done
-            isstr=no
-            for k in "${STRINGS[@]}"; do [ "$f" = "$k" ] && isstr=yes; done
-
+            keep=no; for k in "${KEEP_OURS[@]}"; do [ "$f" = "$k" ] && keep=yes; done
+            isstr=no; for k in "${STRINGS[@]}"; do [ "$f" = "$k" ] && isstr=yes; done
             if [ "$isstr" = yes ]; then
-              python3 - "$f" <<'PYEOF'
-import re, sys
-p = sys.argv[1]
-ours   = open('/tmp/ours',   encoding='utf-8', errors='replace').read()
-theirs = open('/tmp/theirs', encoding='utf-8', errors='replace').read()
-have = set(re.findall(r'<(?:string|plurals|string-array|array)\s+name="([^"]+)"', theirs))
-extra = []
-for kind, name in re.findall(r'<(string|plurals|string-array|array)\s+name="([^"]+)"', ours):
-    if name in have:
-        continue
-    m = re.search(r'\n[ \t]*<%s\s+name="%s".*?</%s>' % (kind, re.escape(name), kind), ours, re.S)
-    if m:
-        extra.append(m.group(0).rstrip())
-out = theirs.replace('</resources>', ''.join(extra) + '\n</resources>') if extra else theirs
-open(p, 'w', encoding='utf-8').write(out)
-print("  union  %s  (+%d 我方独有条目)" % (p, len(extra)))
-PYEOF
+              python3 /tmp/union.py "$f"
             elif [ "$keep" = yes ]; then
               cp /tmp/ours "$f"; echo "  ours    $f"
             else
@@ -92,8 +93,8 @@ PYEOF
             git add "$f"
           done
 
-          if ! grep -q '^\.signing/' .gitignore 2>/dev/null; then
-            printf '\n# 签名密钥（由 GitHub Actions Secrets 在构建时还原，绝不入库）\n.signing/\n*.jks\n' >> .gitignore
+          if ! grep -q "^\.signing/" .gitignore 2>/dev/null; then
+            printf "\n# 签名密钥（由 GitHub Actions Secrets 在构建时还原，绝不入库）\n.signing/\n*.jks\n" >> .gitignore
             git add .gitignore
             echo "  .gitignore 补回密钥忽略规则"
           fi
@@ -117,7 +118,7 @@ PYEOF
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: "21"
           cache: gradle
 
       - name: Compile check
