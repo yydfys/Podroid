@@ -82,12 +82,11 @@ app/src/main/jniLibs/
 
 # Visual companion (brainstorming sessions)
 .superpowers/
-# Local edit backups must never be committed (a .bak under res/ breaks aapt).
-*.bak_*
 app/src/debug/jniLibs/
 
 # Local UML research notes, logs and benchmarks
 /research/
+
 # 签名密钥（由 GitHub Actions Secrets 在构建时还原，绝不入库）
 .signing/
 *.jks

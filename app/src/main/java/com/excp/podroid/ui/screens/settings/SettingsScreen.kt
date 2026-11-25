@@ -84,7 +84,6 @@ import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.withContext
 import com.excp.podroid.ui.components.AdaptiveContainer
-import com.excp.podroid.ui.components.OwnUpdateDialogs
 import com.excp.podroid.ui.components.PodroidDestructiveButton
 import com.excp.podroid.ui.components.PodroidGhostButton
 import com.excp.podroid.ui.components.PodroidInlineAction
@@ -92,7 +91,6 @@ import com.excp.podroid.ui.components.PodroidListRow
 import com.excp.podroid.ui.components.VmBandwidthChips
 import com.excp.podroid.ui.components.VmCpuChips
 import com.excp.podroid.ui.components.VmRamChips
-import com.excp.podroid.ui.components.UpdateUiState
 import com.excp.podroid.ui.components.VmStorageChips
 import com.excp.podroid.ui.components.PodroidChipColors
 import com.excp.podroid.ui.components.PodroidSectionLabel
@@ -128,7 +126,6 @@ fun SettingsScreen(
     val umlRetryMessage by viewModel.umlRetryMessage.collectAsStateWithLifecycle()
     val usbPassthrough by viewModel.usbPassthroughEnabled.collectAsStateWithLifecycle()
     val autostartOnBoot by viewModel.autostartOnBoot.collectAsStateWithLifecycle()
-    val updateState by viewModel.updateState.collectAsStateWithLifecycle()
 
     // rememberSaveable: changing the language calls activity.recreate(), which
     // would otherwise silently close any open dialog and collapse Advanced.
@@ -180,17 +177,11 @@ fun SettingsScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    if (!Environment.isExternalStorageManager()) viewModel.setStorageAccessEnabled(false)
-                } else if (ContextCompat.checkSelfPermission(
-                        ctx, android.Manifest.permission.WRITE_EXTERNAL_STORAGE
-                    ) != PackageManager.PERMISSION_GRANTED
-                ) {
-                    // Same idea for the legacy model (Android 10 and below): never
-                    // leave the toggle on while the share cannot actually work.
-                    viewModel.setStorageAccessEnabled(false)
-                }
+            if (event == Lifecycle.Event.ON_RESUME &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                !Environment.isExternalStorageManager()
+            ) {
+                viewModel.setStorageAccessEnabled(false)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -208,15 +199,6 @@ fun SettingsScreen(
         snackbarHostState.showSnackbar(msg)
         viewModel.clearPortForwardPartialWarning()
     }
-    // "Up to date" has no dialog — a snackbar is enough, and the state must be
-    // consumed so the next tap on Check for updates actually re-runs.
-    LaunchedEffect(updateState) {
-        if (updateState is UpdateUiState.UpToDate) {
-            snackbarHostState.showSnackbar(ctx.getString(R.string.update_up_to_date))
-            viewModel.clearUpdateState()
-        }
-    }
-
     LaunchedEffect(umlRetryMessage) {
         val msg = umlRetryMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
@@ -281,8 +263,6 @@ fun SettingsScreen(
                     onStorageSizeChange = viewModel::setStorageSizeGb,
                     autostartOnBoot = autostartOnBoot,
                     onAutostartChange = viewModel::setAutostartOnBoot,
-                    overlayBubbleEnabled = ui.overlayBubbleEnabled,
-                    onOverlayBubbleChange = viewModel::setOverlayBubbleEnabled,
                 )
 
                 // ── NETWORK ───────────────────────────────────────────
@@ -449,8 +429,6 @@ fun SettingsScreen(
                         onKernelReset = viewModel::resetKernelExtraCmdline,
                         enabled = vmNotRunning,
                         umlActive = activeBackendId == "uml",
-                        umlSeccomp = ui.umlSeccompEnabled,
-                        onUmlSeccompChange = viewModel::setUmlSeccomp,
                     )
                 }
 
@@ -463,8 +441,6 @@ fun SettingsScreen(
                     avfRunning = avfRunning,
                     onRunAvfDiagnostic = runAvfDiagnostic,
                     onExportLogs = { viewModel.exportConsoleLogs() },
-                    onCheckUpdate = viewModel::checkOwnUpdate,
-                    updateInProgress = updateState is UpdateUiState.Checking,
                     umlInfo = umlInfo.takeIf { ui.engineSelection == EngineSelection.UML },
                 )
 
@@ -518,22 +494,6 @@ fun SettingsScreen(
             onDismiss = { showLanguageDialog = false },
         )
     }
-
-    // One dialog driven by the updater state machine (shared with the Home
-    // launch prompt so both entry points behave identically).
-    OwnUpdateDialogs(
-        state = updateState,
-        onDismiss = viewModel::clearUpdateState,
-        onDownload = viewModel::downloadUpdate,
-        onInstalled = viewModel::clearUpdateState,
-        onInstallBlocked = {
-            avfScope.launch {
-                snackbarHostState.showSnackbar(
-                    ctx.getString(R.string.update_install_permission_needed),
-                )
-            }
-        },
-    )
 }
 
 @Composable
@@ -595,8 +555,6 @@ private fun VmResourcesSection(
     onStorageSizeChange: (Int) -> Unit,
     autostartOnBoot: Boolean,
     onAutostartChange: (Boolean) -> Unit,
-    overlayBubbleEnabled: Boolean,
-    onOverlayBubbleChange: (Boolean) -> Unit,
 ) {
     PodroidSectionLabel(stringResource(R.string.vm_resources))
     if (!vmNotRunning) {
@@ -659,28 +617,6 @@ private fun VmResourcesSection(
             bottom = PodroidTokens.Spacing.SM,
         ),
     )
-    // Deliberately not gated on vmNotRunning: the whole point of this row is to
-    // be able to bring the floating ball back while the VM is already running.
-    PodroidListRow(
-        label = stringResource(R.string.overlay_bubble),
-        onClick = { onOverlayBubbleChange(!overlayBubbleEnabled) },
-        rightSlot = {
-            PodroidSwitch(
-                checked = overlayBubbleEnabled,
-                onCheckedChange = onOverlayBubbleChange,
-            )
-        },
-    )
-    Text(
-        text = stringResource(R.string.overlay_bubble_desc),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(
-            start = PodroidTokens.Spacing.MD,
-            end = PodroidTokens.Spacing.MD,
-            bottom = PodroidTokens.Spacing.SM,
-        ),
-    )
 }
 
 @Composable
@@ -690,8 +626,6 @@ private fun AboutSection(
     avfRunning: Boolean,
     onRunAvfDiagnostic: () -> Unit,
     onExportLogs: () -> Unit,
-    onCheckUpdate: () -> Unit,
-    updateInProgress: Boolean,
     umlInfo: UmlInfo?,
 ) {
     PodroidSectionLabel(stringResource(R.string.about))
@@ -704,16 +638,6 @@ private fun AboutSection(
     PodroidGhostButton(
         text = stringResource(R.string.documentation),
         onClick = { uriHandler.openUri("https://extv.github.io/Podroid/guide/") },
-    )
-    Spacer(Modifier.height(PodroidTokens.Spacing.SM))
-    // Checks OUR fork's releases (not upstream) and installs the APK in-app.
-    PodroidGhostButton(
-        text = if (updateInProgress) {
-            stringResource(R.string.update_checking)
-        } else {
-            stringResource(R.string.check_for_updates)
-        },
-        onClick = onCheckUpdate,
     )
     Spacer(Modifier.height(PodroidTokens.Spacing.SM))
     PodroidGhostButton(
@@ -999,25 +923,7 @@ private fun DownloadsSharingRow(
 ) {
     val context = LocalContext.current
     val canManageAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-
-    fun openAppDetailsSettings() {
-        runCatching {
-            context.startActivity(
-                Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.parse("package:${context.packageName}"),
-                )
-            )
-        }
-    }
-
-    val writeStoragePermLauncher = rememberLauncherForActivityResult(RequestPermission()) { granted ->
-        // Denied — or nothing was shown at all because this OS version does not
-        // declare the permission. Either way the app details page is the only
-        // place left to grant it manually; doing nothing here is why the toggle
-        // used to look broken (share silently never activated).
-        if (!granted) openAppDetailsSettings()
-    }
+    val writeStoragePermLauncher = rememberLauncherForActivityResult(RequestPermission()) { _ -> }
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
     fun openAllFilesAccessSettings() {
@@ -1111,8 +1017,6 @@ private fun AdvancedFieldsBlock(
     onKernelReset: () -> Unit,
     enabled: Boolean,
     umlActive: Boolean,
-    umlSeccomp: Boolean,
-    onUmlSeccompChange: (Boolean) -> Unit,
 ) {
     Column(
         verticalArrangement = Arrangement.spacedBy(PodroidTokens.Spacing.MD),
@@ -1145,16 +1049,6 @@ private fun AdvancedFieldsBlock(
             onValueChange = onKernelChange,
             onReset = onKernelReset,
             minLines = 2,
-        )
-        // Only reachable on the UML backend (the flag is ignored by QEMU/AVF),
-        // but shown unconditionally so it can be set before switching, when the
-        // failing UML run that motivates it has already happened.
-        AdvancedSwitchSetting(
-            label = stringResource(R.string.uml_seccomp_label),
-            helper = stringResource(R.string.uml_seccomp_helper),
-            checked = umlSeccomp,
-            enabled = enabled,
-            onCheckedChange = onUmlSeccompChange,
         )
     }
 }
@@ -1250,40 +1144,6 @@ private fun AddPortForwardDialog(
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
         },
     )
-}
-
-/** Label + helper on the left, switch on the right; mirrors AdvancedTextSetting. */
-@Composable
-private fun AdvancedSwitchSetting(
-    label: String,
-    helper: String,
-    checked: Boolean,
-    enabled: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.weight(1f),
-            )
-            PodroidSwitch(
-                checked = checked,
-                onCheckedChange = onCheckedChange,
-                enabled = enabled,
-            )
-        }
-        Text(
-            text = helper,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 2.dp),
-        )
-    }
 }
 
 @Composable
