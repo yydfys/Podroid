@@ -1,7 +1,7 @@
 name: merge-upstream-apply
 
-# 一次性：把上游 main 合进来（历史已不共享，用 --allow-unrelated-histories），
-# 冲突按「自己的定制文件保留我方，其余取上游」，推到 merge/ 分支并做编译验证。
+# 一次性：上游 main 合并（历史不共享）。用 2026-11-07 的上游快照当合成基点，
+# 逐文件做真正的三方合并；剩下真冲突时按策略兜底。推到 merge/ 分支 + 编译验证，
 # 不推 main、不发版。
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
           git remote add upstream https://github.com/ExTV/Podroid.git
           git fetch --no-tags upstream main
 
-      - name: Merge and resolve
+      - name: Merge and resolve (synthetic 3-way)
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -33,10 +33,11 @@ jobs:
           git config user.name  "podroid-sync"
           git config user.email "sync@local"
           UP=$(git rev-parse --short upstream/main)
+          BASE=$(git rev-list -1 --before="2026-11-08T00:00:00Z" upstream/main)
+          echo "upstream=$UP  synthetic-base=$(echo "$BASE" | cut -c1-8) ($(git log -1 --format=%cs "$BASE"))"
 
           git merge --no-commit --no-ff --allow-unrelated-histories upstream/main || true
 
-          # 自己改过的文件：保留我方（含悬浮球 / VM 自动拉起 / OVERLAY 权限那一整套）
           KEEP_OURS=(
             "app/src/main/java/com/excp/podroid/service/PodroidService.kt"
             "app/src/main/java/com/excp/podroid/engine/VmEngine.kt"
@@ -46,24 +47,36 @@ jobs:
             "app/src/main/java/com/excp/podroid/ui/screens/setup/SetupScreen.kt"
             "app/src/main/java/com/excp/podroid/ui/screens/home/HomeScreen.kt"
           )
-          echo "=== 冲突处理明细 ==="
+
+          echo "=== 三方合并明细 ==="
           for f in $(git diff --name-only --diff-filter=U); do
-            take=theirs
-            for k in "${KEEP_OURS[@]}"; do [ "$f" = "$k" ] && take=ours; done
-            git checkout "--$take" -- "$f"
+            git show "HEAD:$f"          > /tmp/ours  2>/dev/null || : > /tmp/ours
+            git show "$BASE:$f"         > /tmp/base  2>/dev/null || : > /tmp/base
+            git show "upstream/main:$f" > /tmp/theirs 2>/dev/null || : > /tmp/theirs
+            if git merge-file -p /tmp/ours /tmp/base /tmp/theirs > /tmp/merged 2>/dev/null; then
+              cp /tmp/merged "$f"; echo "  ok(3way)   $f"
+            else
+              cp /tmp/merged "$f"
+              left=$(grep -c '^<<<<<<<' "$f" 2>/dev/null || true)
+              take=theirs
+              for k in "${KEEP_OURS[@]}"; do [ "$f" = "$k" ] && take=ours; done
+              if [ "$take" = "ours" ]; then cp /tmp/ours "$f"; else cp /tmp/theirs "$f"; fi
+              echo "  conflict(${left:-?}) -> $take  $f"
+            fi
             git add "$f"
-            echo "  $take  $f"
           done
 
-          # add/add 但没冲突标记的（内容相同或仅一侧存在）
-          git diff --name-only --diff-filter=U | while read -r f; do git add "$f"; done || true
-
-          if git diff --cached --quiet && ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-            echo "没有可提交的内容，退出"; exit 1
+          # 签名密钥忽略规则：上游 .gitignore 里没有这两行，补回来
+          if ! grep -q '^\.signing/' .gitignore 2>/dev/null; then
+            printf '\n# 签名密钥（由 GitHub Actions Secrets 在构建时还原，绝不入库）\n.signing/\n*.jks\n' >> .gitignore
+            git add .gitignore
+            echo "  .gitignore 补回 .signing/ 与 *.jks"
           fi
-          git commit -m "chore(sync): merge upstream ${UP} (unrelated histories) [skip ci]"
-          git push origin HEAD:refs/heads/merge/upstream-20261126
-          echo "=== 推送完成 ==="
+
+          echo "剩余冲突数: $(git diff --name-only --diff-filter=U | wc -l)"
+          git commit -m "chore(sync): merge upstream ${UP} with synthetic 3-way base [skip ci]"
+          git push "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/merge/upstream-20261126
+          echo "=== 已推送 merge/upstream-20261126 ==="
           git log --oneline -2
 
       - name: Prepare Android SDK
@@ -75,7 +88,6 @@ jobs:
           SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
           [ -x "$SM" ] || SM=$(find "$SDK/cmdline-tools" -maxdepth 3 -name sdkmanager | head -1)
           yes | "$SM" --licenses > /dev/null 2>&1 || true
-          echo "sdk root: $SDK"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -88,4 +100,4 @@ jobs:
         run: |
           set -o pipefail
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace :app:assembleDebug 2>&1 | tail -120
+          ./gradlew --no-daemon --stacktrace :app:assembleDebug 2>&1 | tail -150
