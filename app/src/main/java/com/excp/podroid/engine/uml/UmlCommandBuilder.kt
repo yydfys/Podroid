@@ -27,12 +27,6 @@ data class UmlLaunchParams(
     val inlineRules: List<PortForwardRule>,
     val downloadsPath: String?,
     val probe: Boolean,
-    /**
-     * UML's own syscall sandbox. `off` makes UML use ptrace for syscall
-     * interception instead of seccomp — slower, and only useful on hosts whose
-     * seccomp policy kills the seccomp path with SIGSYS (exit 159).
-     */
-    val seccomp: Boolean = true,
 )
 
 data class UmlCommand(val argv: List<String>, val env: Map<String, String>)
@@ -86,7 +80,7 @@ object UmlCommandBuilder {
         val args = mutableListOf<String>()
         args += "mem=${if (p.probe) PROBE_RAM_MB else c.ramMb}M"
         args += "ncpus=${c.cpus}"
-        args += if (p.seccomp) "seccomp=on" else "seccomp=off"
+        args += "seccomp=on"
         args += "initrd=${File(files, "initrd.img").path}"
         if (p.probe) {
             // Only the scratch disk: init-podroid refuses to run the probe at all
