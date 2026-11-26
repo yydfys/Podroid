@@ -180,17 +180,11 @@ fun SettingsScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    if (!Environment.isExternalStorageManager()) viewModel.setStorageAccessEnabled(false)
-                } else if (ContextCompat.checkSelfPermission(
-                        ctx, android.Manifest.permission.WRITE_EXTERNAL_STORAGE
-                    ) != PackageManager.PERMISSION_GRANTED
-                ) {
-                    // Same idea for the legacy model (Android 10 and below): never
-                    // leave the toggle on while the share cannot actually work.
-                    viewModel.setStorageAccessEnabled(false)
-                }
+            if (event == Lifecycle.Event.ON_RESUME &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                !Environment.isExternalStorageManager()
+            ) {
+                viewModel.setStorageAccessEnabled(false)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
